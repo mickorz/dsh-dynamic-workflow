@@ -1,0 +1,33 @@
+{
+  "name": "@mickorz/dynamic-workflow-adapter-dsh",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DeepSeek Harness 宿主 adapter:standalone 增强引擎 + dynamic_workflow 工具(P0 Spike)",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@mickorz/dynamic-workflow-core": "*",
+    "@mickorz/dynamic-workflow-executor-vm": "*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-subagent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

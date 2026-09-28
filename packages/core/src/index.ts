@@ -30,6 +30,8 @@ export type {
 export { WorkflowError, WorkflowErrorCode, wrapError } from "./contracts/errors.js"
 export type { AgentRunOptions, AgentExecutionResult, AgentSessionRunner } from "./contracts/session-runner.js"
 export type { WorkflowExecutor } from "./contracts/executor.js"
+export type { HostCapabilities } from "./contracts/host.js"
+export { MINIMAL_HOST_CAPABILITIES } from "./contracts/host.js"
 
 // ---- runtime ----
 export {
