@@ -21,7 +21,8 @@ import fs from "node:fs"
 import path from "node:path"
 import type { AgentExecutionRecord, JournalEntry } from "../contracts/types.js"
 
-const JOURNAL_DIR = path.join(".opencode-workflows", "journal")
+/** journal 落盘目录默认值（OpenCode 宿主惯例；其他宿主可经构造参数覆盖） */
+const DEFAULT_JOURNAL_ROOT = path.join(".opencode-workflows", "journal")
 /** runId 只允许出现在文件名里的安全字符 */
 const SAFE_RUN_ID = /^[a-zA-Z0-9_-]+$/
 /** executions 历史保留上限（retry 极端场景封顶） */
@@ -38,8 +39,13 @@ export class JournalStore {
   /** runId -> 内存态（同一 run 内多次追加只读一次盘） */
   private readonly cache = new Map<string, JournalFile>()
 
-  constructor(projectDir: string) {
-    this.dir = path.join(projectDir, JOURNAL_DIR)
+  /**
+   * @param projectDir 项目基准目录
+   * @param journalRoot 落盘目录（相对 projectDir；缺省 .opencode-workflows/journal，
+   *   宿主 adapter 可传自己的目录名，如 DSH 的 .dynamic-workflows/journal）
+   */
+  constructor(projectDir: string, journalRoot: string = DEFAULT_JOURNAL_ROOT) {
+    this.dir = path.join(projectDir, journalRoot)
   }
 
   /** 加载某次 run 的 journal 为回放用的 Map；不存在返回空 Map */

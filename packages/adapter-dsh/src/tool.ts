@@ -24,6 +24,8 @@ export interface DynamicWorkflowToolCallArgs {
   args?: Record<string, unknown>
   concurrency?: number
   maxAgents?: number
+  /** 续跑历史 run（上次结果里的 runId）：未变 agent 调用直接从 journal 回放 */
+  resumeFromRunId?: string
 }
 
 export interface DynamicWorkflowToolResult {
@@ -56,6 +58,7 @@ export function buildDynamicWorkflowTool(deps: DynamicWorkflowToolDeps) {
         args: { type: "object", description: "暴露给脚本的全局 args 对象(JSON)" },
         concurrency: { type: "number", description: "最大并发 agent 数,钳制上限 16" },
         maxAgents: { type: "number", description: "本次 run 的 agent 总数上限,缺省 1000" },
+        resumeFromRunId: { type: "string", description: "续跑历史 run(上次结果里的 runId):未变 agent 调用直接从 journal 回放,首个变更调用及其后重跑" },
       },
       required: ["script"],
     } as Record<string, unknown>,
@@ -67,12 +70,13 @@ export function buildDynamicWorkflowTool(deps: DynamicWorkflowToolDeps) {
           args: input.args,
           concurrency: input.concurrency,
           maxAgents: input.maxAgents,
+          resumeFromRunId: input.resumeFromRunId,
           signal: deps.signal,
         })
         const rendered = renderResult(result.result as unknown)
         return {
           ok: true,
-          output: `workflow "${result.meta.name}" 完成(${result.agentCount} agents,${result.durationMs}ms)\n${rendered}`,
+          output: `workflow "${result.meta.name}" 完成(${result.agentCount} agents,${result.durationMs}ms${result.resumedFromDisk ? ",resume 回放" : ""})\n${rendered}`,
           value: result.result,
           agentCount: result.agentCount,
           durationMs: result.durationMs,
