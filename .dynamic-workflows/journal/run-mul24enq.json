@@ -1,0 +1,1 @@
+{"version":1,"runId":"run-mul24enq","entries":{"run-mul24enq:0":{"label":"agent 1","sessionId":"r0","executions":[{"executionId":"run-mul24enq:0:1","attempt":1,"status":"failed","label":"agent 1","sessionId":"r0","error":"子代理失败: primary down","startedAt":1790588434750,"durationMs":0,"usage":{"inputTokens":0,"outputTokens":0}}]}}}

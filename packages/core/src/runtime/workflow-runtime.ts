@@ -120,6 +120,8 @@ export interface WorkflowRunOptions {
   }
   /** 子 workflow 嵌套深度上限（缺省 MAX_WORKFLOW_DEPTH=3） */
   maxWorkflowDepth?: number
+  /** workflow 注册表目录段（相对 cwd；缺省 .opencode-workflows/workflows，宿主可覆盖） */
+  registryRootDir?: string
 }
 
 /** checkpoint() 的可选项（P1-4，仅确认型：OpenCode 无自由文本 UI 通道） */
@@ -190,6 +192,8 @@ interface SharedRunContext {
   cwd: string
   /** workflow 名字引用缓存（v0.10 Registry）：workflowId -> 脚本绝对路径；首查扫描 .opencode-workflows/workflows/，运行中不重扫（子脚本增删不影响进行中 run） */
   registryCache?: Map<string, string>
+  /** workflow 注册表目录段（相对 cwd；缺省 .opencode-workflows/workflows，宿主可覆盖） */
+  registryRootDir?: string
   /** 子 workflow 嵌套深度上限（分支 A） */
   maxWorkflowDepth: number
 }
@@ -251,6 +255,7 @@ function createSharedRunContext(options: WorkflowRunOptions, runId: string): Sha
     composites: [],
     cwd: options.cwd ?? process.cwd(),
     maxWorkflowDepth: options.maxWorkflowDepth ?? MAX_WORKFLOW_DEPTH,
+    registryRootDir: options.registryRootDir,
   }
   const initial = normalizeConcurrency(
     options.concurrency ?? Math.max(1, (globalThis.navigator?.hardwareConcurrency ?? 8) - 2),
@@ -646,14 +651,14 @@ async function executeWorkflow(
   const resolveByName = (workflowId: string): string => {
     if (!shared.registryCache) {
       shared.registryCache = new Map(
-        Array.from(loadRegistry(shared.cwd).entries()).map(([id, wf]) => [id, wf.filePath]),
+        Array.from(loadRegistry(shared.cwd, shared.registryRootDir).entries()).map(([id, wf]) => [id, wf.filePath]),
       )
     }
     const found = shared.registryCache.get(workflowId)
     if (!found) {
       const known = Array.from(shared.registryCache.keys()).join(", ") || "（目录为空或不存在）"
       throw new WorkflowError(
-        `WORKFLOW_NOT_FOUND：workflow() 未找到名为 "${workflowId}" 的子流程（目录 ${workflowsDir(shared.cwd)}，已知 id：${known}；脚本需含 export const meta = { id 或 name }）`,
+        `WORKFLOW_NOT_FOUND：workflow() 未找到名为 "${workflowId}" 的子流程（目录 ${workflowsDir(shared.cwd, shared.registryRootDir)}，已知 id：${known}；脚本需含 export const meta = { id 或 name }）`,
         WorkflowErrorCode.SCRIPT_VALIDATION_ERROR,
         { recoverable: false },
       )

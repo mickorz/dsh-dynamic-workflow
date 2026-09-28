@@ -40,11 +40,13 @@ export interface DynamicWorkflowToolResult {
 }
 
 const DESCRIPTION = [
-  "运行动态工作流:执行一段 JavaScript 编排脚本,通过 agent() 将任务分发给子代理并行执行,",
-  "parallel()/pipeline() 组合调度,脚本内汇总后仅返回最终结果,避免子代理上下文污染主会话。",
-  "适用:全仓检查、独立并行调研、多视角评审、扇出汇总。",
-  "脚本契约:首条语句 export const meta = { name, description };可用全局 agent/parallel/pipeline/phase/log/args;",
-  "禁止 import/require/Date.now()/Math.random()/new Date();agent() 至少调用一次。",
+  "运行动态工作流:执行一段 JavaScript 编排脚本,通过 agent() 将任务分发给子代理并行执行,仅返回聚合结果。",
+  "可用全局:agent(prompt, opts) 派发子代理(label/phase/schema/provider-model/tier/timeoutMs/retries);",
+  "parallel(函数数组)/ pipeline(items, stages) 并发;sequence 串行传递/fallback 换候选/race 并行竞争;",
+  "check 确定性验证(含 fileExists 与 commandSuccess)/ verify 对抗式评审/ judgePanel 评审团/ retry 有界重试;",
+  "workflow(路径或注册名, args) 嵌套子流程(查 .dynamic-workflows/workflows); phase/log/args/setConcurrency 编排辅助。",
+  "脚本契约:首条语句 export const meta = { name, description };禁止 import/Date.now()/Math.random()/new Date();",
+  "agent 至少一次;中断后可用 resumeFromRunId 续跑(已完成步骤从 journal 回放不重调)。",
 ].join("")
 
 export function buildDynamicWorkflowTool(deps: DynamicWorkflowToolDeps) {

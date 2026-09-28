@@ -43,11 +43,12 @@ function readTierKeys(file: string | undefined): ModelTiers {
 }
 
 /** 加载 tier 配置：全局 + 项目 overlay（项目同名键覆盖全局） */
-export function loadModelTiers(options: { globalFile?: string; projectDir?: string } = {}): ModelTiers {
+export function loadModelTiers(options: { globalFile?: string; projectDir?: string; projectRootDir?: string } = {}): ModelTiers {
   const globalFile =
     options.globalFile ?? path.join(os.homedir(), ".config", "opencode", "workflows", "model-tiers.json")
+  const projectRoot = options.projectRootDir ?? ".opencode-workflows"
   const projectFile = options.projectDir
-    ? path.join(options.projectDir, ".opencode-workflows", "model-tiers.json")
+    ? path.join(options.projectDir, projectRoot, "model-tiers.json")
     : undefined
   return { ...readTierKeys(globalFile), ...readTierKeys(projectFile) }
 }

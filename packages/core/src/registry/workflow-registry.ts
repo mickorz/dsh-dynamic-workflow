@@ -18,13 +18,16 @@ export interface RegisteredWorkflow {
   filePath: string
 }
 
-export function workflowsDir(directory: string): string {
-  return path.join(directory, ".opencode-workflows", "workflows")
+/** workflow 注册表目录(默认 OpenCode 宿主惯例;其他宿主可传自己的目录段) */
+const DEFAULT_REGISTRY_ROOT = ".opencode-workflows/workflows"
+
+export function workflowsDir(directory: string, rootDir: string = DEFAULT_REGISTRY_ROOT): string {
+  return path.join(directory, rootDir)
 }
 
 /** 扫描 workflows 目录；目录不存在返回空表 */
-export function loadRegistry(directory: string): Map<string, RegisteredWorkflow> {
-  const dir = workflowsDir(directory)
+export function loadRegistry(directory: string, rootDir: string = DEFAULT_REGISTRY_ROOT): Map<string, RegisteredWorkflow> {
+  const dir = workflowsDir(directory, rootDir)
   const result = new Map<string, RegisteredWorkflow>()
   if (!fs.existsSync(dir)) return result
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -49,8 +52,8 @@ export function loadRegistry(directory: string): Map<string, RegisteredWorkflow>
 }
 
 /** 按 workflowId 读脚本原文；不存在抛 WORKFLOW_NOT_FOUND 语义错误 */
-export function readWorkflowScript(directory: string, workflowId: string): string {
-  const registry = loadRegistry(directory)
+export function readWorkflowScript(directory: string, workflowId: string, rootDir: string = DEFAULT_REGISTRY_ROOT): string {
+  const registry = loadRegistry(directory, rootDir)
   const found = registry.get(workflowId)
   if (!found) {
     const known = Array.from(registry.keys()).join(", ") || "（目录为空或不存在）"

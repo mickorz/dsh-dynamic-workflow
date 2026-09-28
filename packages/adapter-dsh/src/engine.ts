@@ -14,6 +14,7 @@
 import {
   runWorkflow,
   JournalStore,
+  loadModelTiers,
   type AgentRecord,
   type JournalEntry,
 } from "@mickorz/dynamic-workflow-core"
@@ -23,6 +24,10 @@ import type { PortStartSubagent } from "./port.js"
 
 /** journal 落盘目录(相对 cwd;与 OpenCode 版 .opencode-workflows 同构,DSH 宿主命名) */
 export const JOURNAL_DIR = ".dynamic-workflows/journal"
+/** workflow 注册表目录(相对 cwd;workflow() 按名引用的查找目录) */
+export const REGISTRY_DIR = ".dynamic-workflows/workflows"
+/** tier 配置目录(相对 cwd;其下 model-tiers.json) */
+export const TIER_ROOT = ".dynamic-workflows"
 
 export interface DynamicWorkflowEngineOptions {
   startSubagent: PortStartSubagent
@@ -97,6 +102,8 @@ export class DynamicWorkflowEngine {
       maxAgents: input.maxAgents,
       signal: input.signal,
       cwd: this.options.cwd,
+      registryRootDir: REGISTRY_DIR,
+      resolveTier: (tier) => loadModelTiers({ projectDir: this.options.cwd, projectRootDir: TIER_ROOT })[tier],
       runId,
       resumeJournal: resumedFromDisk ? resumeJournal : undefined,
       onAgentJournal: (entry: JournalEntry & { key: string }) => {
