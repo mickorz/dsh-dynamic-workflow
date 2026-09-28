@@ -1,0 +1,42 @@
+# dsh-dynamic-workflow
+
+**跨 Harness 的 Agent Workflow Runtime**:Durable / Composable / Resumable / Verifiable / Human-in-the-loop。从原 `@mickorz/opencode-dynamic-workflows` 抽象出宿主无关的 Runtime Core,OpenCode 与 DeepSeek Harness (DSH) 是它的两个宿主(adapter),架构上欢迎下一个 harness。
+
+## 项目定位
+
+DSH 官方 workflow 是"最小可信内核";本项目提供官方 Deferred 清单里的扩展层(journal/resume、嵌套 workflow、注册表、组合控制流、质量验证、checkpoint、模型分层)。**不是"给 DSH 再做一套 workflow"**。
+
+引擎策略(见 Docs/可行性分析.md):
+- P0 `mode: "standalone"`(默认):自带增强引擎,注册独立工具 `dynamic_workflow`,与官方 `workflow` 共存,不碰 `ctx.workflowEngine`;
+- P1 验证稳定后可选 `mode: "replace-official"`。
+
+执行后端经 `WorkflowExecutor` 抽象(vm 起步,PTC 为 production 路线)。
+
+## 仓库结构(monorepo 规划)
+
+- `packages/core/` — 宿主无关编排运行时:runtime / vm / journal / DSL 全集 / 组合节点 / registry
+- `packages/executor-vm/`、`packages/executor-ptc/` — 执行后端
+- `packages/opencode/` — OpenCode 插件(重构为薄 adapter)
+- `packages/dsh/` — DSH bundle + adapter + `dynamic_workflow` 工具
+- `Docs/` — 需求、知识库、可行性分析与方案文档
+- `thirdparties/` — 第三方参考源码(不纳入版本管理,见 .gitignore)
+  - `opencode-dynamic-workflows/` — 原开发的 OpenCode 插件(移植蓝本)
+  - `deepseek-harness/` — DeepSeek Harness 官方源码
+    - `packages/workflow/` — 官方 workflow 实现(集成参考)
+      - `workflow/` — `@deepseek-ai/dsh-workflow`,ctx.workflowEngine 服务、run 词汇表、workflow/* 事件
+      - `workflow-ptc/` — 共享沙箱 PTC Node 进程运行时
+      - `tool-workflow/` — 注册 `workflow` 工具给模型
+      - `tool-ralph/` — 注册 `ralph` 工具(fresh-agent 固定循环)
+
+## 开发规范
+
+- TypeScript,ESM,与 deepseek-harness 包规范保持一致
+- 参考文档优先读:`thirdparties/deepseek-harness/docs/subsystems/workflow.md`
+- 知识库文档位于 `Docs/`,新增分析文档按主题命名存放
+- 修改/新增代码前先查 `thirdparties/` 内已有实现,避免重复造轮子
+
+## 常用参考
+
+- 官方 workflow 子系统文档: `thirdparties/deepseek-harness/docs/subsystems/workflow.md`
+- 原插件 DSL 参考: `thirdparties/opencode-dynamic-workflows/skills/workflow-authoring/references/runtime.md`
+- 官方设计笔记: `thirdparties/deepseek-harness/.agents/notes/implemented/feature/2026-07-05-dynamic-workflows.md`

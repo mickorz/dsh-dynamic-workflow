@@ -1,0 +1,27 @@
+# thirdparties 为第三方参考源码,不纳入本仓库版本管理
+thirdparties/
+
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# 日志与缓存
+*.log
+.cache/
+coverage/
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 编辑器与系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+# 本地文档目录,默认不提交
+Docs/
