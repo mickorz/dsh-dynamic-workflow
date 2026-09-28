@@ -68,6 +68,10 @@ export type { RegisteredWorkflow } from "./registry/workflow-registry.js"
 export { loadModelTiers } from "./tier/model-tiers.js"
 export type { ModelTiers } from "./tier/model-tiers.js"
 
+// ---- schedule ----
+// ---- schedule ----
+export { validateCron, nextRun, latestSlot } from "./schedule/cron.js"
+
 // ---- isolation ----
 export { createWorktree, removeWorktree } from "./isolation/worktree.js"
 export type { WorktreeInfo } from "./isolation/worktree.js"

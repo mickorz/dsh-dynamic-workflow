@@ -28,7 +28,8 @@ DSH 官方 workflow 是"最小可信内核";本项目提供官方 Deferred 清�
 - [x] **P1 差异化能力完成**(全 DSL 在 adapter-dsh 面验收:fallback/check/verify/judgePanel/嵌套+registry/tier/retry;registry 与 tier 目录宿主化参数注入)
 - [x] **P1.5 HITL 完成**(checkpoint 五态状态机 + pending 跨中断恢复 + ADR-004;confirm abort 中止面补缺)
 - [x] **P2 Production 完成**(后台运行 BackgroundRunManager+dynamic_workflow_control、run 级超时/重试、worktree 验收、vm syncTimeoutMs;executor-ptc 推迟至真机需求)
-- [ ] P3 生态
+- [x] **P3 生态完成**(示例工作流集+冒烟守门、cron 触发薄层 createCronTrigger、README 完整化;cron 校验提升 core 共用)
+- 路线图 P-1 至 P3 全部完成;真机联调与 executor-ptc 按需求牵引后置
 - `thirdparties/` — 第三方参考源码(不纳入版本管理,见 .gitignore)
   - `opencode-dynamic-workflows/` — 原开发的 OpenCode 插件(移植蓝本)
   - `deepseek-harness/` — DeepSeek Harness 官方源码

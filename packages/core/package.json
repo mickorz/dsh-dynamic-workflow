@@ -18,7 +18,8 @@
     "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
-    "acorn": "^8.16.0"
+    "acorn": "^8.16.0",
+    "cron-parser": "^5.10.1"
   },
   "devDependencies": {
     "@types/acorn": "^6.0.0",
