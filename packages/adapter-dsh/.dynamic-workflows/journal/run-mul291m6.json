@@ -1,1 +1,0 @@
-{"version":1,"runId":"run-mul291m6","entries":{"run-mul291m6:0":{"label":"agent 1","executions":[{"executionId":"run-mul291m6:0:1","attempt":1,"status":"failed","label":"agent 1","error":"seam down","startedAt":1790588651119,"durationMs":0,"usage":{"inputTokens":0,"outputTokens":0}}]}}}
