@@ -1,0 +1,58 @@
+{
+  "name": "@mickorz/opencode-dynamic-workflows",
+  "version": "0.11.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode 动态工作流插件(Main Agent 生成 JS Workflow,Runtime 并行调度子会话,仅返回汇总结果)— core + executor-vm 的宿主 adapter",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mickorz/dsh-dynamic-workflow"
+  },
+  "files": [
+    "dist",
+    "src/tui",
+    "skills",
+    "commands",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "opencode-dynamic-workflows": "dist/cli/index.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./tui": "./src/tui/index.tsx"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.tui.json",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@mickorz/dynamic-workflow-core": "*",
+    "@mickorz/dynamic-workflow-executor-vm": "*",
+    "@clack/prompts": "1.8.0",
+    "@opentui/solid": "0.4.5",
+    "acorn": "^8.16.0",
+    "cron-parser": "^5.10.1",
+    "jsonc-parser": "^3.3.1",
+    "solid-js": "1.9.12"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "1.18.27"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.27",
+    "@opentui/core": "0.4.5",
+    "@opentui/keymap": "0.4.5",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "@mickorz/dynamic-workflow-executor-vm": "*"
+  }
+}

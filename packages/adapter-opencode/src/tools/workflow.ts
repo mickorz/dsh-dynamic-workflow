@@ -1,0 +1,299 @@
+import { tool, type PluginInput } from "@opencode-ai/plugin"
+import { runWorkflow } from "@mickorz/dynamic-workflow-core"
+import { vmExecutor } from "@mickorz/dynamic-workflow-executor-vm"
+import { OpenCodeSessionAdapter } from "../adapters/opencode-session-adapter.js"
+import { JournalStore } from "@mickorz/dynamic-workflow-core"
+import { loadModelTiers } from "@mickorz/dynamic-workflow-core"
+import { renderWorkflowResult } from "./render.js"
+import { buildProgressMetadata, type WorkflowProgressStatus } from "./workflow-progress.js"
+import { buildRunSnapshot, cleanupRunSnapshots, RUN_SNAPSHOT_HEARTBEAT_MS, tryWriteRunSnapshot } from "./run-snapshot.js"
+import { lookupRootSessionId, registerAgentSession, unregisterAgentSessions } from "./run-lineage.js"
+import { parseWorkflowScript } from "@mickorz/dynamic-workflow-core"
+import { resolveScriptText } from "./script-source.js"
+import { BackgroundRunManager } from "./background-runs.js"
+import type { JournalEntry, AgentRecord, AgentExecutionRecord, CompositeRecord } from "@mickorz/dynamic-workflow-core"
+
+const DESCRIPTION = [
+  "运行动态工作流：执行一段 JavaScript 编排脚本，通过 agent() 将任务分发给子代理（独立会话）并行执行，",
+  "parallel()/pipeline() 组合调度，脚本内变量汇总后仅返回最终结果，避免大量子代理上下文污染主会话。",
+  "适用形态：全仓检查、独立并行调研、多视角评审、扇出汇总。编写脚本前先加载 workflow-authoring skill。",
+  "脚本规则：首条语句 export const meta = { name, description }；可用全局 agent/parallel/pipeline/phase/log/args/setConcurrency/verify/judgePanel/retry/checkpoint/workflow；",
+  "workflow(路径或注册名或 {scriptPath,label}, args) 为原生子工作流原语：路径为 ./ ../ 绝对路径，其余按注册名查 .opencode-workflows/workflows/（meta.id ?? meta.name，含斜杠名合法）；同 run 共享并发配额与中断，父子 phase 自动带 ▸ 前缀分组；父脚本可纯编排（不直接调 agent）；嵌套默认最多 3 层（maxWorkflowDepth 可调）；",
+  "禁止 import/require/Date.now()/Math.random()/new Date()；agent() 至少调用一次。",
+  "agent() 缺省用只读的 explore 子代理，写文件类任务显式传 { agentType: 'general' }。",
+  "缺省后台运行：立即返回 runId 不阻塞，完成后结果自动发回本会话。需要同步拿结果或 checkpoint 人工确认时显式传 background:false 走前台。",
+].join("")
+
+export function createWorkflowTool(ctx: PluginInput, background: BackgroundRunManager) {
+  return tool({
+    description: DESCRIPTION,
+
+    args: {
+      script: tool.schema.string().optional().describe(
+        "JavaScript 工作流脚本原文，无 markdown 围栏。首条语句必须是 export const meta = { name: 'short_snake_case', description: '...' }。可用全局：agent(prompt, opts) / parallel(函数数组) / pipeline(items, ...stages) / sequence(nodes) / fallback(nodes) / race(nodes) / check(cond, msg) / phase(title) / log(msg) / args / setConcurrency(n) / workflow(scriptPath 或 {scriptPath,label}, args)（原生子工作流）。详见 workflow-authoring skill。",
+      ),
+      scriptPath: tool.schema.string().optional().describe(
+        "脚本文件路径（相对项目目录或绝对路径），服务端执行时读盘拿最新内容；与 script 二选一。执行 scripts 目录里的示例脚本时优先用它，避免粘贴原文导致的陈旧缓存与改写失真。",
+      ),
+      args: tool.schema.record(tool.schema.string(), tool.schema.any()).optional().describe(
+        "暴露给脚本的全局 args 对象（JSON）。",
+      ),
+      concurrency: tool.schema.number().optional().describe("最大并发 agent 数，钳制上限 16；缺省 CPU核数-2。"),
+      maxAgents: tool.schema.number().optional().describe("本次 run 的 agent 总数上限，缺省 1000。"),
+      agentTimeoutMs: tool.schema.number().optional().describe("单 agent 超时毫秒数；缺省不设硬超时。"),
+      agentRetries: tool.schema.number().optional().describe("可恢复失败的自动重试次数（上限 3），缺省 0。"),
+      resumeFromRunId: tool.schema.string().optional().describe(
+        "续跑某次历史 run（传入上次结果里的 runId）与修改后的 script：未变的 agent() 调用直接从 journal 回放（不调 LLM），首个变更调用及其后全部重跑。调用按位置匹配，保持前序调用不变且有序。",
+      ),
+      background: tool.schema.boolean().optional().describe(
+        "后台运行（P2）：缺省 true，立即返回 runId 不阻塞本轮对话，完成后结果自动发回本会话；用 workflow_control 工具查状态或停止。两个例外强制前台：agent 嵌套会话内调用（需同步拿结果继续编排）、resumeFromRunId 续跑（后台未接 journal 回放）。显式传 false 前台阻塞直到完成（checkpoint 才有人工确认弹窗，后台走 headless 默认值）。",
+      ),
+    },
+
+    async execute(input, context) {
+      let script: string
+      try {
+        script = resolveScriptText(input, context.directory)
+      } catch (error) {
+        return {
+          title: "workflow",
+          output: `workflow 参数错误：${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+      const normalized = normalizeWorkflowScript(script)
+      if (!normalized) {
+        return { title: "workflow", output: "workflow 需要 script（脚本原文）或 scriptPath（文件路径）参数" }
+      }
+      script = normalized
+
+      // B1 嵌套显示：若本会话是某活跃 run 的 agent 子会话，透传其根会话；否则自己就是根
+      const rootSessionId = lookupRootSessionId(context.sessionID) ?? context.sessionID
+      // 缺省后台（长跑任务不阻塞对话）。两个例外强制前台，即使显式传 true 也降级：
+      //  1) agent 嵌套会话内调用：后台结果只会回传到 agent 会话，中间层拿不到工具返回值，嵌套编排链会断
+      //  2) resumeFromRunId 续跑：后台路径未接 journal 回放，避免 resume 参数被静默丢弃
+      const runInBackground =
+        (input.background ?? true) && rootSessionId === context.sessionID && !input.resumeFromRunId
+
+      // 后台路径（P2-2）：立即返回 runId，结果完成后回传主会话
+      if (runInBackground) {
+        let runId: string
+        try {
+          runId = background.start(
+            { client: ctx.client, parentSessionId: context.sessionID, directory: context.directory, rootSessionId },
+            {
+              script,
+              args: input.args,
+              concurrency: input.concurrency,
+              maxAgents: input.maxAgents,
+              agentTimeoutMs: input.agentTimeoutMs,
+              agentRetries: input.agentRetries,
+              trigger: { type: "manual" },
+            },
+          )
+        } catch (error) {
+          return {
+            title: "workflow",
+            output: `后台工作流启动失败（脚本校验）：${error instanceof Error ? error.message : String(error)}`,
+          }
+        }
+        return {
+          title: "workflow",
+          output: `后台工作流已启动（runId: ${runId}）。本轮对话不被阻塞；完成后结果会自动发回本会话。可用 workflow_control 查询进度或停止；中断后可用 resumeFromRunId="${runId}" 续跑。`,
+          metadata: { runId, background: true },
+        }
+      }
+
+      // journal：按项目目录落盘，逐 agent 写入（中断后续跑仍可回放已完成部分）
+      const journalStore = new JournalStore(context.directory)
+      let resumeJournal: Map<string, JournalEntry> | undefined
+      if (input.resumeFromRunId) {
+        resumeJournal = journalStore.load(input.resumeFromRunId)
+        if (resumeJournal.size === 0) {
+          return {
+            title: "workflow",
+            output: `找不到 run "${input.resumeFromRunId}" 的 journal（该项目目录下无 .opencode-workflows/journal/<runId>.json，或内容为空）；直接省略 resumeFromRunId 开新 run。`,
+          }
+        }
+      }
+      let journaledRunId: string | undefined
+      // F-20 实时通道：runId 提前生成，脚本名宽松解析（仅展示用）
+      const runId = input.resumeFromRunId ?? `run-${Date.now().toString(36)}`
+      let workflowName: string | undefined
+      try {
+        workflowName = parseWorkflowScript(script).meta.name
+      } catch {
+        // 脚本非法的规范错误由 runWorkflow 抛出；此处只取展示名
+      }
+      // 镜像通道（TUI实时通道优化方案）：onAgentUpdate 维护 records 并写运行快照，TUI 每秒轮询渲染实时树。
+      // 执行期 context.metadata 推送经实证不产生事件（需求文档 9.6/9.8），不再调用；
+      // 完成态仍走 tool 返回值 metadata（下方 return，C 通道兜底）。
+      cleanupRunSnapshots(context.directory, context.sessionID)
+      const progressRecords: AgentRecord[] = []
+      // 组合节点记录（P2-3）：onCompositeUpdate 维护，随快照供 TUI 组合树渲染
+      const progressComposites: CompositeRecord[] = []
+      // 血统注册面：本 run 创建的 agent 子会话 -> rootSessionId；run 结束统一注销（见 finally）
+      const registeredSessions = new Set<string>()
+      const writeTerminalSnapshot = (records: ReadonlyArray<AgentRecord>, status: WorkflowProgressStatus) => {
+        tryWriteRunSnapshot(
+          context.directory,
+          buildRunSnapshot({
+            runId,
+            parentSessionId: context.sessionID,
+            rootSessionId,
+            name: workflowName,
+            status,
+            records,
+            composites: progressComposites,
+            time: Date.now(),
+          }),
+        )
+      }
+      const modelTiers = loadModelTiers({ projectDir: context.directory })
+      const resolveTier = (tier: string) => modelTiers[tier]
+      // checkpoint 人工确认通道：ToolContext.ask 的允许/拒绝映射为 true/false（拒绝不抛错，脚本可分支处理）
+      const confirm = async (promptText: string): Promise<unknown> => {
+        try {
+          await context.ask({
+            permission: "workflow-checkpoint",
+            patterns: [promptText.slice(0, 120)],
+            always: [],
+            metadata: { message: promptText },
+          })
+          return true
+        } catch {
+          return false
+        }
+      }
+      const onAgentJournal = (entry: JournalEntry & { key: string }) => {
+        journaledRunId = entry.key.slice(0, entry.key.indexOf(":"))
+        try {
+          // 整条 entry 直通（Node Inspector 展示元数据随 JournalEntry 扩展字段自动落盘）
+          const { key, ...entryBody } = entry
+          journalStore.append(journaledRunId, key, entryBody)
+        } catch {
+          // 落盘失败不阻断运行（journal 仅影响回放优化）
+        }
+      }
+      // 失败/中止 attempt 的执行历史（FR-7）：只写 executions，绝不影响 resume
+      const onAgentExecution = (payload: { key: string; execution: AgentExecutionRecord }) => {
+        try {
+          journalStore.recordExecution(runId, payload.key, payload.execution)
+        } catch {
+          // 同上：落盘失败不阻断
+        }
+      }
+
+      const degradeNotes: string[] = []
+      const adapter = new OpenCodeSessionAdapter({
+        client: ctx.client,
+        parentSessionId: context.sessionID,
+        onStructuredDegrade: ({ label, reason }) => {
+          degradeNotes.push(`agent "${label}" 结构化输出降级（网关不支持 json_schema，已改用 prompt JSON 模式）：${reason}`)
+        },
+      })
+
+      // abort 级联：Esc 中断主会话 -> context.abort -> run 级信号 -> 各 agent attempt 取消 + 子会话 abort
+      const runController = new AbortController()
+      const onAbort = () => runController.abort()
+      if (context.abort.aborted) runController.abort()
+      else context.abort.addEventListener("abort", onAbort)
+
+      // 心跳：agent 状态迁移间隔可达数十秒（并行期无迁移），补时间戳防 TUI 误判失联
+      const heartbeat = setInterval(() => writeTerminalSnapshot(progressRecords, "running"), RUN_SNAPSHOT_HEARTBEAT_MS)
+
+      try {
+        const result = await runWorkflow(script, {
+          executor: vmExecutor,
+          agent: adapter,
+          args: input.args,
+          concurrency: input.concurrency,
+          maxAgents: input.maxAgents,
+          agentTimeoutMs: input.agentTimeoutMs ?? null,
+          agentRetries: input.agentRetries,
+          signal: runController.signal,
+          resolveTier,
+          confirm,
+          trigger: { type: "manual" },
+          cwd: context.directory,
+          runId,
+          resumeJournal,
+          onAgentJournal,
+          onAgentExecution,
+          onAgentUpdate: (record) => {
+            const index = progressRecords.findIndex((r) => r.id === record.id)
+            if (index >= 0) progressRecords[index] = record
+            else progressRecords.push(record)
+            // B1：子会话创建即回传（running 态已带 sessionId），注册血统供嵌套 workflow 查表
+            if (record.sessionId) {
+              registeredSessions.add(record.sessionId)
+              registerAgentSession(record.sessionId, rootSessionId)
+            }
+            writeTerminalSnapshot(progressRecords, "running")
+          },
+          onCompositeUpdate: (record) => {
+            const index = progressComposites.findIndex((c) => c.id === record.id)
+            if (index >= 0) progressComposites[index] = record
+            else progressComposites.push(record)
+          },
+        })
+        // 结构化降级可观测性：附在日志尾部（P1-2）
+        for (const note of degradeNotes) result.logs.push(note)
+        // 完成态双落盘：镜像快照（B 通道终态）与 tool 返回值 metadata（C 通道兜底，
+        // prompt.ts 会用 result.metadata 覆盖 state，不带的话旧会话重开时 sidebar 树消失）
+        writeTerminalSnapshot(result.agents, "completed")
+        const rendered = renderWorkflowResult(result)
+        return {
+          ...rendered,
+          metadata: {
+            ...rendered.metadata,
+            ...buildProgressMetadata({
+              runId,
+              name: workflowName,
+              status: "completed",
+              records: result.agents,
+              composites: result.composites,
+            }),
+          },
+        }
+      } catch (error) {
+        if (runController.signal.aborted || (error instanceof Error && /abort/i.test(error.message))) {
+          // 用户中断：返回已完成的进度摘要而非抛错（平台会把 tool part 标记为 interrupted）
+          const resumeHint = journaledRunId
+            ? `\n已完成的 agent 已记入 journal，续跑请传 resumeFromRunId="${journaledRunId}"。`
+            : ""
+          writeTerminalSnapshot(progressRecords, "aborted")
+          return {
+            title: "workflow",
+            output: `工作流被用户中断：${error instanceof Error ? error.message : String(error)}${resumeHint}`,
+            // 中断也带终态快照：sidebar 显示中止态而非永久 running
+            metadata: buildProgressMetadata({
+              runId,
+              name: workflowName,
+              status: "aborted",
+              records: progressRecords,
+              composites: progressComposites,
+            }),
+          }
+        }
+        // 失败终态：异常上抛前写一次终态快照，TUI 不至于永久显示 running
+        writeTerminalSnapshot(progressRecords, "failed")
+        throw error
+      } finally {
+        clearInterval(heartbeat)
+        context.abort.removeEventListener("abort", onAbort)
+        // 本 run 结束：注销血统（嵌套工具调用均已返回，不存在仍在使用注册项的窗口）
+        unregisterAgentSessions(registeredSessions)
+      }
+    },
+  })
+}
+
+
+
+/** 剥离可能的 markdown 围栏 */
+function normalizeWorkflowScript(script: string): string {
+  let text = script.trim()
+  const fence = text.match(/^```(?:js|javascript)?\s*\n([\s\S]*?)\n```$/i)
+  if (fence) text = fence[1].trim()
+  return text
+}

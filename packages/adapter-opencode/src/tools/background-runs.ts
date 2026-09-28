@@ -1,0 +1,300 @@
+/**
+ * BackgroundRunManager —— 后台工作流注册表与生命周期（P2-2 / F-18 + F-17）
+ *
+ * 生命周期：
+ *  start({client, parentSessionId, directory}, script, input)
+ *   -> parseWorkflowScript 先验脚本（同步报错，不吞后台异常）
+ *   -> 注册 runId -> { controller, 记录快照 } 到内存注册表
+ *   -> 分离执行 runWorkflow（journal 逐 agent 落盘，onAgentUpdate 维护进度）
+ *   -> 完成/失败/中止后，把渲染结果作为一条消息 prompt 回主会话（结果回传）
+ *
+ *  stop(runId)  -> controller.abort() -> runtime 停止派发 + 各子会话 abort 级联
+ *  status()     -> 注册表快照（运行中/最近完成，完成的保留最近 20 条）
+ *
+ * 注意：
+ *  - 后台 run 不接 tool context.abort（tool 调用早已返回），Esc 不影响后台——控制走 workflow_control
+ *  - 中断/失败后 journal 已持久化，可用 workflow(resumeFromRunId) 续跑
+ *  - checkpoint 在后台 run 无人工通道，走 headless default（与 Pi 后台语义一致）
+ */
+
+import type { PluginInput } from "@opencode-ai/plugin"
+import { runWorkflow, type WorkflowRunOptions } from "@mickorz/dynamic-workflow-core"
+import { vmExecutor } from "@mickorz/dynamic-workflow-executor-vm"
+import { parseWorkflowScript } from "@mickorz/dynamic-workflow-core"
+import { OpenCodeSessionAdapter } from "../adapters/opencode-session-adapter.js"
+import { JournalStore } from "@mickorz/dynamic-workflow-core"
+import { loadModelTiers } from "@mickorz/dynamic-workflow-core"
+import { renderWorkflowResult } from "./render.js"
+import {
+  buildRunSnapshot,
+  cleanupRunSnapshots,
+  RUN_SNAPSHOT_HEARTBEAT_MS,
+  tryWriteRunSnapshot,
+} from "./run-snapshot.js"
+import { lookupRootSessionId, registerAgentSession, unregisterAgentSessions } from "./run-lineage.js"
+import type { AgentRecord, CompositeRecord } from "@mickorz/dynamic-workflow-core"
+
+export type BackgroundRunStatus = "running" | "completed" | "failed" | "aborted"
+
+export interface BackgroundRunInfo {
+  runId: string
+  name: string
+  status: BackgroundRunStatus
+  startedAt: number
+  endedAt?: number
+  /** 各 agent 终态记录（onAgentUpdate 维护） */
+  records: AgentRecord[]
+  /** 组合节点记录（onCompositeUpdate 维护；P2-3 快照透传） */
+  composites: CompositeRecord[]
+  logs: string[]
+  error?: string
+  /** 是否已把结果回传主会话 */
+  delivered?: boolean
+}
+
+/** 状态快照（给 workflow_control 展示用，不含内部对象） */
+export type BackgroundRunSnapshot = BackgroundRunInfo
+
+export interface BackgroundStartDeps {
+  client: PluginInput["client"]
+  parentSessionId: string
+  directory: string
+  /** 祖先主会话（B1 嵌套显示）：缺省时 start 内部查血统表回退 parentSessionId */
+  rootSessionId?: string
+}
+
+export interface BackgroundStartInput {
+  script: string
+  args?: Record<string, unknown>
+  concurrency?: number
+  maxAgents?: number
+  agentTimeoutMs?: number
+  agentRetries?: number
+  /** 终态回调（completed/failed/aborted 后调用一次；ScheduleRuntime 用于写终态 Record）。回调抛错不阻断 run */
+  onFinished?: (info: BackgroundRunInfo) => void
+  /** checkpoint 人工确认通道（scheduled run 注入即败版本，需求 17） */
+  confirm?: (promptText: string) => Promise<unknown>
+  /** 触发来源（manual / schedule） */
+  trigger?: RunTrigger
+}
+
+/** 完成后注册表里保留的历史条数 */
+const KEEP_COMPLETED = 20
+
+/** run 触发来源元数据（透传给 runWorkflow 写入 run 日志，需求 26 Observability） */
+export type RunTrigger = NonNullable<WorkflowRunOptions["trigger"]>
+
+export class BackgroundRunManager {
+  private readonly runs = new Map<string, InternalRun>()
+  private seq = 0
+
+  /** 启动后台 run；脚本非法立即抛错，否则立刻返回 runId */
+  start(deps: BackgroundStartDeps, input: BackgroundStartInput): string {
+    const { meta } = parseWorkflowScript(input.script)
+    const runId = `run-${Date.now().toString(36)}-${++this.seq}`
+    // B1：嵌套后台 run 透传祖先主会话（调用方已查表则直用），快照与清理都按它归属
+    const rootSessionId = deps.rootSessionId ?? lookupRootSessionId(deps.parentSessionId) ?? deps.parentSessionId
+    const info: BackgroundRunInfo = {
+      runId,
+      name: meta.name,
+      status: "running",
+      startedAt: Date.now(),
+      records: [],
+      composites: [],
+      logs: [],
+    }
+    // 镜像通道（TUI实时通道优化方案）：新 run 启动前清理同会话终态快照
+    cleanupRunSnapshots(deps.directory, deps.parentSessionId)
+    const controller = new AbortController()
+    this.runs.set(runId, { info, controller })
+    this.prune()
+
+    // 分离执行：不阻塞 tool 返回
+    void this.execute(deps, rootSessionId, input, info, controller)
+
+    return runId
+  }
+
+  private async execute(
+    deps: BackgroundStartDeps,
+    rootSessionId: string,
+    input: BackgroundStartInput,
+    info: BackgroundRunInfo,
+    controller: AbortController,
+  ): Promise<void> {
+    // 镜像通道：后台 run 唯一的可视化来源（无 tool 返回值 metadata），实时与终态都写这里
+    const writeSnapshot = (status: BackgroundRunStatus) => {
+      tryWriteRunSnapshot(
+        deps.directory,
+        buildRunSnapshot({
+          runId: info.runId,
+          parentSessionId: deps.parentSessionId,
+          rootSessionId,
+          name: info.name,
+          status,
+          records: info.records,
+          composites: info.composites,
+          time: Date.now(),
+        }),
+      )
+    }
+    const degradeNotes: string[] = []
+    const adapter = new OpenCodeSessionAdapter({
+      client: deps.client,
+      parentSessionId: deps.parentSessionId,
+      onStructuredDegrade: ({ label, reason }) => {
+        const note = `agent "${label}" 结构化输出降级（网关不支持 json_schema，已改用 prompt JSON 模式）：${reason}`
+        info.logs.push(note)
+        degradeNotes.push(note)
+      },
+    })
+    const journalStore = new JournalStore(deps.directory)
+    const modelTiers = loadModelTiers({ projectDir: deps.directory })
+
+    // 心跳：agent 状态迁移间隔可达数十秒（并行期无迁移），补时间戳防 TUI 误判失联。
+    // 仅 running 态才写：完成后的 session.prompt 回传期间不再覆写终态快照，
+    // 否则已完成 run 的快照被持续刷新为 running，与后续 run 的活快照 time 交错导致 TUI 横跳
+    const heartbeat = setInterval(() => {
+      if (info.status === "running") writeSnapshot("running")
+    }, RUN_SNAPSHOT_HEARTBEAT_MS)
+    // 血统注册面：本 run 的 agent 子会话 -> rootSessionId；run 结束统一注销（见 finally）
+    const registeredSessions = new Set<string>()
+    try {
+      const result = await runWorkflow(input.script, {
+        executor: vmExecutor,
+        agent: adapter,
+        args: input.args,
+        concurrency: input.concurrency,
+        maxAgents: input.maxAgents,
+        agentTimeoutMs: input.agentTimeoutMs ?? null,
+        agentRetries: input.agentRetries,
+        signal: controller.signal,
+        runId: info.runId,
+        cwd: deps.directory,
+        resolveTier: (tier) => modelTiers[tier],
+        confirm: input.confirm,
+        trigger: input.trigger,
+        onAgentJournal: (entry) => {
+          try {
+            // 整条 entry 直通（Node Inspector 展示元数据随 JournalEntry 扩展字段自动落盘）
+            const { key, ...entryBody } = entry
+            journalStore.append(key.slice(0, key.indexOf(":")), key, entryBody)
+          } catch {
+            // 落盘失败不阻断运行
+          }
+        },
+        onAgentExecution: (payload) => {
+          try {
+            journalStore.recordExecution(info.runId, payload.key, payload.execution)
+          } catch {
+            // 落盘失败不阻断运行
+          }
+        },
+        onCompositeUpdate: (record) => {
+          const index = info.composites.findIndex((c) => c.id === record.id)
+          if (index >= 0) info.composites[index] = record
+          else info.composites.push(record)
+        },
+        onAgentUpdate: (record) => {
+          const index = info.records.findIndex((r) => r.id === record.id)
+          if (index >= 0) info.records[index] = record
+          else info.records.push(record)
+          // B1：子会话创建即回传（running 态已带 sessionId），注册血统供嵌套 workflow 查表
+          if (record.sessionId) {
+            registeredSessions.add(record.sessionId)
+            registerAgentSession(record.sessionId, rootSessionId)
+          }
+          writeSnapshot("running")
+        },
+      })
+      info.status = "completed"
+      info.logs.push(...result.logs, ...degradeNotes)
+      writeSnapshot("completed")
+
+      // 终态回调先于回传（ScheduleRun Record 等外部状态不能被回传延迟阻塞）；endedAt 提前赋值供回调消费
+      info.endedAt = Date.now()
+      try {
+        input.onFinished?.(info)
+      } catch {
+        // 回调失败仅丢失外部记录，run 本身已终态
+      }
+
+      // 结果回传：渲染文本作为一条消息发回主会话，Main Agent 接力汇报
+      const rendered = renderWorkflowResult(result)
+      info.delivered = true
+      await deps.client.session.prompt({
+        path: { id: deps.parentSessionId },
+        body: {
+          parts: [
+            {
+              type: "text",
+              text: `[后台工作流已完成，以下是 tool 结果原文，请向用户汇报]\n\n${rendered.output}`,
+            },
+          ],
+        },
+      })
+    } catch (error) {
+      if (controller.signal.aborted) {
+        info.status = "aborted"
+        info.error = "被 workflow_control 停止"
+      } else {
+        info.status = "failed"
+        info.error = error instanceof Error ? error.message : String(error)
+      }
+      info.logs.push(
+        `后台工作流${info.status === "aborted" ? "被停止" : "失败"}：${info.error}。已完成的 agent 已记入 journal，可传 resumeFromRunId="${info.runId}" 续跑。`,
+      )
+      // 失败也回传主会话（用户需要知道）；终态回调先落（回传挂起/失败不阻塞 Record）
+      writeSnapshot(info.status)
+      info.endedAt = Date.now()
+      try {
+        input.onFinished?.(info)
+      } catch {
+        // 同上：回调失败不影响 run 终态
+      }
+      try {
+        info.delivered = true
+        await deps.client.session.prompt({
+          path: { id: deps.parentSessionId },
+          body: {
+            parts: [{ type: "text", text: `[后台工作流状态：${info.status}]\n\n${info.logs[info.logs.length - 1]}` }],
+          },
+        })
+      } catch {
+        // 主会话可能已关闭；状态仍可在 workflow_control 里查到
+      }
+    } finally {
+      clearInterval(heartbeat)
+      info.endedAt = Date.now()
+      // 本 run 结束：注销血统（嵌套工具调用均已返回，不存在仍在使用注册项的窗口）
+      unregisterAgentSessions(registeredSessions)
+    }
+  }
+
+  /** 停止一个后台 run；返回是否找到且仍在运行 */
+  stop(runId: string): boolean {
+    const run = this.runs.get(runId)
+    if (!run || run.info.status !== "running") return false
+    run.controller.abort()
+    return true
+  }
+
+  /** 注册表快照 */
+  status(): BackgroundRunSnapshot[] {
+    return Array.from(this.runs.values()).map((run) => run.info)
+  }
+
+  private prune(): void {
+    const completed = Array.from(this.runs.values())
+      .filter((run) => run.info.status !== "running")
+      .sort((a, b) => (a.info.endedAt ?? 0) - (b.info.endedAt ?? 0))
+    for (const run of completed.slice(0, Math.max(0, completed.length - KEEP_COMPLETED))) {
+      this.runs.delete(run.info.runId)
+    }
+  }
+}
+
+interface InternalRun {
+  info: BackgroundRunInfo
+  controller: AbortController
+}

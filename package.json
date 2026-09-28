@@ -1,0 +1,17 @@
+{
+  "name": "dsh-dynamic-workflow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "跨 Harness 的 Agent Workflow Runtime:core + executor + 宿主 adapter(monorepo)",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "boundary": "node scripts/check-core-boundary.mjs"
+  }
+}

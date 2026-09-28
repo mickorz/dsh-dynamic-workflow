@@ -1,0 +1,24 @@
+{
+  "name": "@mickorz/dynamic-workflow-executor-vm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WorkflowExecutor 的进程内 node:vm 实现(MVP 执行后端)",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "@mickorz/dynamic-workflow-core": "*"
+  }
+}
