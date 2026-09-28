@@ -18,7 +18,7 @@ import {
   type AgentRecord,
   type JournalEntry,
 } from "@mickorz/dynamic-workflow-core"
-import { vmExecutor } from "@mickorz/dynamic-workflow-executor-vm"
+import { createVmExecutor } from "@mickorz/dynamic-workflow-executor-vm"
 import { DshSubagentRunner } from "./subagent-runner.js"
 import type { PortStartSubagent } from "./port.js"
 
@@ -39,6 +39,8 @@ export interface DynamicWorkflowEngineOptions {
   confirm?: (promptText: string) => Promise<unknown>
   concurrency?: number
   maxAgents?: number
+  /** 同步切片超时毫秒(vm 执行后端;默认 5000,0 禁用) */
+  syncTimeoutMs?: number
 }
 
 /** 进度事件(observe-only 快照;对齐官方 workflow/* 事件的最小面) */
@@ -53,6 +55,12 @@ export interface EngineRunInput {
   signal?: AbortSignal
   concurrency?: number
   maxAgents?: number
+  /** 单 agent 超时毫秒（run 级默认）；null/缺省不设硬超时 */
+  agentTimeoutMs?: number | null
+  /** 可恢复失败的自动重试次数（run 级默认，上限 3） */
+  agentRetries?: number
+  /** 指定本次 run 的 journal 身份(后台管理器固定 runId 用;缺省自动生成) */
+  runId?: string
   /** 续跑历史 run:从盘加载 journal,未变前缀回放 */
   resumeFromRunId?: string
 }
@@ -93,15 +101,17 @@ export class DynamicWorkflowEngine {
       ? this.journalStore.load(input.resumeFromRunId)
       : undefined
     const resumedFromDisk = resumeJournal !== undefined && resumeJournal.size > 0
-    const runId = input.resumeFromRunId ?? `run-${Date.now().toString(36)}`
+    const runId = input.runId ?? input.resumeFromRunId ?? `run-${Date.now().toString(36)}`
     const onProgress = this.options.onProgress
 
     const result = await runWorkflow(input.script, {
-      executor: vmExecutor,
+      executor: createVmExecutor({ syncTimeoutMs: this.options.syncTimeoutMs }),
       agent: this.runner,
       args: input.args,
       concurrency: input.concurrency,
       maxAgents: input.maxAgents,
+      agentTimeoutMs: input.agentTimeoutMs,
+      agentRetries: input.agentRetries,
       signal: input.signal,
       cwd: this.options.cwd,
       registryRootDir: REGISTRY_DIR,

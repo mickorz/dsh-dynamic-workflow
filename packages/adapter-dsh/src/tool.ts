@@ -12,9 +12,12 @@
  */
 
 import type { DynamicWorkflowEngine } from "./engine.js"
+import type { BackgroundRunManager } from "./background-runs.js"
 
 export interface DynamicWorkflowToolDeps {
   engine: DynamicWorkflowEngine
+  /** 后台 run 注册表(工具 background 参数需要;缺省则 background 调用报错) */
+  background?: BackgroundRunManager
   /** 调用方中止信号(宿主工具执行语境;P0 由 glue 从 exec.signal 传入) */
   signal?: AbortSignal
 }
@@ -24,8 +27,14 @@ export interface DynamicWorkflowToolCallArgs {
   args?: Record<string, unknown>
   concurrency?: number
   maxAgents?: number
+  /** 单 agent 超时毫秒(run 级默认);不设无硬超时 */
+  agentTimeoutMs?: number
+  /** 可恢复失败的自动重试次数(上限 3) */
+  agentRetries?: number
   /** 续跑历史 run（上次结果里的 runId）：未变 agent 调用直接从 journal 回放 */
   resumeFromRunId?: string
+  /** 后台运行：立即返回 runId 不阻塞；结果可经 dynamic_workflow_control 查询 */
+  background?: boolean
 }
 
 export interface DynamicWorkflowToolResult {
@@ -61,17 +70,49 @@ export function buildDynamicWorkflowTool(deps: DynamicWorkflowToolDeps) {
         concurrency: { type: "number", description: "最大并发 agent 数,钳制上限 16" },
         maxAgents: { type: "number", description: "本次 run 的 agent 总数上限,缺省 1000" },
         resumeFromRunId: { type: "string", description: "续跑历史 run(上次结果里的 runId):未变 agent 调用直接从 journal 回放,首个变更调用及其后重跑" },
+        agentTimeoutMs: { type: "number", description: "单 agent 超时毫秒(run 级默认);不设无硬超时" },
+        agentRetries: { type: "number", description: "可恢复失败的自动重试次数(上限 3)" },
+        background: { type: "boolean", description: "后台运行:立即返回 runId 不阻塞;结果经 dynamic_workflow_control 查询" },
       },
       required: ["script"],
     } as Record<string, unknown>,
     async execute(input: DynamicWorkflowToolCallArgs): Promise<DynamicWorkflowToolResult> {
       const script = normalizeScript(input.script)
+      if (input.background === true) {
+        const manager = deps.background
+        if (!manager) {
+          throw new Error("background 后台运行未启用：构造工具时需注入 BackgroundRunManager")
+        }
+        let runId: string
+        try {
+          runId = manager.start({ engine: deps.engine, signal: deps.signal }, {
+            script,
+            args: input.args,
+            concurrency: input.concurrency,
+            maxAgents: input.maxAgents,
+            resumeFromRunId: input.resumeFromRunId,
+          })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          return { ok: false, output: `后台工作流启动失败（脚本预验）：${message}`, value: null, agentCount: 0, durationMs: 0, runId: "" }
+        }
+        return {
+          ok: true,
+          output: `后台工作流已启动（runId: ${runId}）。本轮不阻塞；完成后可用 dynamic_workflow_control 查询结果；中断后可 resumeFromRunId="${runId}" 续跑。`,
+          value: null,
+          agentCount: 0,
+          durationMs: 0,
+          runId,
+        }
+      }
       try {
         const result = await deps.engine.run({
           script,
           args: input.args,
           concurrency: input.concurrency,
           maxAgents: input.maxAgents,
+          agentTimeoutMs: input.agentTimeoutMs,
+          agentRetries: input.agentRetries,
           resumeFromRunId: input.resumeFromRunId,
           signal: deps.signal,
         })

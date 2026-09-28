@@ -33,4 +33,6 @@ npm test           # 全部包测试(core 163 + opencode 162 + adapter-dsh 21)
 npm run boundary   # core 依赖边界检查(禁宿主/执行器 import)
 ```
 
-路线图:P-1 Core Extraction(完成)-> P0 Architecture Spike(完成)-> P0.5 Durability Spike(完成)-> P1 差异化能力 -> P1.5 HITL -> P2 Production -> P3 生态。
+路线图:P-1 Core Extraction(完成)-> P0 Architecture Spike(完成)-> P0.5 Durability Spike(完成)-> P1 差异化能力(完成)-> P1.5 HITL(完成)-> P2 Production(完成)-> P3 生态。
+
+P2 说明:后台运行(BackgroundRunManager + dynamic_workflow_control)、run 级超时/重试参数面、worktree 隔离、vm 同步切片超时(syncTimeoutMs,默认 5000ms)已交付;**executor-ptc 完整进程隔离后端推迟**至真机需求牵引(异步回调内的新同步自旋需进程级隔离,WorkflowExecutor 接口已备,届时新增包不动 core)。

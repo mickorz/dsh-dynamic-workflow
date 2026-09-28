@@ -6,12 +6,18 @@
  *   -> DETERMINISM_PRELUDE（vm 域内中和 Math.random / Date.now / new Date()）
  *   -> 包裹为 (async () => { body })() 执行
  *
+ * P2 加固：syncTimeoutMs(默认 5000,官方 PTC 同款语义)保护脚本的每个同步切片 ——
+ * node:vm 的 timeout 只能在进入 runInContext 时计时,杀死脚本 seized 事件循环前的同步段
+ * (含首个 await 前);异步回调里的新同步自旋不受此保护(进程级隔离见 executor-ptc 规划)。
+ *
  * 注意：vm 不是安全沙箱，防的是可信脚本的"意外非确定性"，不是攻击。
- * 已知天花板(ponytail 注):同步自旋(while true)不可杀 —— production 后端见 executor-ptc(规划中)。
  */
 
 import vm from "node:vm"
 import type { WorkflowExecutor } from "@mickorz/dynamic-workflow-core"
+
+/** 默认同步切片超时(毫秒);0 = 禁用 */
+export const DEFAULT_SYNC_TIMEOUT_MS = 5000
 
 /**
  * 运行时确定性加固，在 vm 域内、用户脚本之前执行：
@@ -38,11 +44,12 @@ const DETERMINISM_PRELUDE = [
   "}",
 ].join("\n")
 
-/** 在 vm 沙箱中执行 workflow body,返回脚本 return 值 */
+/** 在 vm 沙箱中执行 workflow body,返回脚本 return 值;syncTimeoutMs 杀同步切片 */
 export async function runScriptInVm(
   body: string,
   metaName: string,
   globals: Record<string, unknown>,
+  syncTimeoutMs: number = DEFAULT_SYNC_TIMEOUT_MS,
 ): Promise<unknown> {
   const context = vm.createContext({
     ...globals,
@@ -52,8 +59,15 @@ export async function runScriptInVm(
 
   const wrapped = `${DETERMINISM_PRELUDE}\n(async () => {\n${body}\n})()`
   const script = new vm.Script(wrapped, { filename: `${metaName || "workflow"}.js` })
-  return (await script.runInContext(context)) as unknown
+  const timeoutOption = syncTimeoutMs > 0 ? { timeout: syncTimeoutMs } : {}
+  return (await script.runInContext(context, timeoutOption)) as unknown
 }
 
-/** WorkflowExecutor 的 node:vm 实现(MVP 执行后端) */
+/** WorkflowExecutor 的 node:vm 实现(默认同步切片超时) */
 export const vmExecutor: WorkflowExecutor = { runScriptInVm }
+
+/** 工厂:自定义同步切片超时(0 = 禁用) */
+export function createVmExecutor(options: { syncTimeoutMs?: number } = {}): WorkflowExecutor {
+  const syncTimeoutMs = options.syncTimeoutMs ?? DEFAULT_SYNC_TIMEOUT_MS
+  return { runScriptInVm: (body, name, globals) => runScriptInVm(body, name, globals, syncTimeoutMs) }
+}
