@@ -42,6 +42,7 @@ import type {
   JournalEntry,
   WorkflowExecutionRecord,
   WorkflowRunResult,
+  CheckpointRequest as CheckpointRequestT,
 } from "../contracts/types.js"
 import { buildOutputPreview, truncatePromptForJournal } from "./agent-result.js"
 import { createNodeExecutor, compositeScopeStorage, type WorkflowNode } from "../nodes/node-contract.js"
@@ -1128,20 +1129,31 @@ async function executeWorkflow(
   }
 
   /** 人工确认点（P1-4，Pi checkpoint 的确认型子集）：确定性哈希 + journal 回放，不花 token */
-  const checkpoint = async (promptText: string, checkpointOptions: CheckpointOptions = {}): Promise<unknown> => {
+  const checkpoint = async (
+    input: string | CheckpointRequestT,
+    checkpointOptions: CheckpointOptions = {},
+  ): Promise<unknown> => {
     throwIfAborted()
-    if (typeof promptText !== "string") throw new TypeError("checkpoint(promptText, options?) 需要 prompt 字符串")
-    // 哈希身份：promptText + default + headless（与结果相关的全部选项）
+    // 入参归一：字符串旧签名等价于 { message }；对象签名见 CheckpointRequest(ADR-004)
+    const request: CheckpointRequestT =
+      typeof input === "string" ? { message: input } : input
+    if (typeof request !== "object" || request === null || typeof request.message !== "string" || !request.message.trim()) {
+      throw new TypeError("checkpoint(message 或 { id, message, payload, options, defaultAction, timeoutMs }, options?) 需要非空 message")
+    }
+    const promptText = request.message
+    const defaultAction = request.defaultAction !== undefined ? request.defaultAction : checkpointOptions.default
+    // 哈希身份：request 全文 + default + headless（与结果相关的全部选项）
     const callIndex = scope.callSeq++
     const journalKey = scopedKey(shared, scope, callIndex)
+    const checkpointId = request.id ?? (promptText.length > 24 ? `${promptText.slice(0, 24)}…` : promptText)
     const callHash = createHash("sha256")
-      .update(JSON.stringify({ promptText, default: checkpointOptions.default ?? null, headless: checkpointOptions.headless ?? null }))
+      .update(JSON.stringify({ request, default: defaultAction ?? null, headless: checkpointOptions.headless ?? null }))
       .digest("hex")
     // 观测记录（P2-4）：checkpoint 与 agent 同一展示面，kind 区分；等待人工 = running
     const displayPhase = scope.phasePrefix ? scope.phasePrefix + (scope.currentPhase ?? "") : scope.currentPhase
     const cpRecord: AgentRecord = {
       id: journalKey,
-      label: promptText.length > 24 ? `${promptText.slice(0, 24)}…` : promptText,
+      label: checkpointId,
       ...(displayPhase ? { phase: displayPhase } : {}),
       status: "running",
       kind: "checkpoint",
@@ -1160,14 +1172,17 @@ async function executeWorkflow(
       shared.onAgentUpdate?.(cpRecord)
     }
     const cached = shared.resumeJournal?.get(journalKey)
-    if (cached != null && cached.hash === callHash && callIndex < scope.firstMiss) {
+    const hashMatches = cached != null && cached.hash === callHash
+    // pending 恢复等待（ADR-004）：上次中断时 checkpoint 仍 pending —— 不回放，重新询问
+    const pendingOnDisk = hashMatches && cached?.checkpoint?.status === "pending"
+    if (hashMatches && !pendingOnDisk && callIndex < scope.firstMiss) {
       shared.agentCount++
       cpRecord.startedAt = undefined
-      // 回放同样确定性重现拒绝（Human Reject 强停止语义；改 prompt 文本才会重新询问）
+      // 回放同样确定性重现拒绝（Human Reject 强停止语义；改 request 才会重新询问）
       if (cached.result === false) {
         finishCp("failed", "人工拒绝（回放）", true)
         throw new WorkflowError(
-          `checkpoint 被人工拒绝（回放）："${promptText}"`,
+          `checkpoint 被人工拒绝（回放）："${checkpointId}"`,
           WorkflowErrorCode.CHECKPOINT_REJECTED,
           { recoverable: false },
         )
@@ -1175,43 +1190,76 @@ async function executeWorkflow(
       finishCp("ok", undefined, true)
       return cached.result
     }
-    if (cached == null || cached.hash !== callHash) {
+    if (!hashMatches || pendingOnDisk) {
       scope.firstMiss = Math.min(scope.firstMiss, callIndex)
     }
     shared.agentCount++
 
     cpRecord.startedAt = Date.now()
+    // pending 落盘（ADR-004）：等待人工前先持久化状态机 pending；中断后 resume 按此恢复等待
+    shared.onAgentJournal?.({
+      key: journalKey,
+      hash: callHash,
+      result: undefined,
+      checkpoint: { checkpointId, status: "pending", request, createdAt: Date.now() },
+    })
     let reply: unknown
+    let expired = false
     if (shared.confirm) {
       try {
-        reply = await shared.confirm(promptText)
+        const ask = shared.confirm(promptText)
+        // abort 中止面:人工通道可能永不 settle(等待中),run 取消时竞争打断
+        // (真实宿主 ask 通道会 reject;此处保证任意通道下中断可生效)
+        const abortSignal = shared.signal
+        const abortedAsk = abortSignal
+          ? new Promise<never>((_, reject) => {
+              if (abortSignal.aborted) reject(new WorkflowError("workflow aborted", WorkflowErrorCode.WORKFLOW_ABORTED, { recoverable: true }))
+              else abortSignal.addEventListener("abort", () => reject(new WorkflowError("workflow aborted", WorkflowErrorCode.WORKFLOW_ABORTED, { recoverable: true })), { once: true })
+            })
+          : null
+        const guarded = abortedAsk ? Promise.race([ask, abortedAsk]) : ask
+        reply = request.timeoutMs !== undefined
+          ? await withTimeout(guarded, request.timeoutMs, checkpointId, () => {})
+          : await guarded
       } catch (error) {
         if (isAborted()) {
           finishCp("aborted")
           throw wrapError(error)
         }
-        throw error
+        // 超时：取 defaultAction（status 记 expired），不是失败
+        if (request.timeoutMs !== undefined && error instanceof WorkflowError && error.code === WorkflowErrorCode.AGENT_TIMEOUT) {
+          expired = true
+          reply = defaultAction ?? true
+        } else {
+          throw error
+        }
       }
     } else if (checkpointOptions.headless === "abort") {
       finishCp("failed", "headless 无确认通道")
       throw new WorkflowError(
-        `checkpoint 需要人工确认但无可用通道（headless）："${promptText}"`,
+        `checkpoint 需要人工确认但无可用通道（headless）："${checkpointId}"`,
         WorkflowErrorCode.WORKFLOW_ABORTED,
         { recoverable: false },
       )
     } else {
-      reply = checkpointOptions.default ?? true
+      reply = defaultAction ?? true
     }
     throwIfAborted()
-    log(`checkpoint："${promptText}" -> ${JSON.stringify(reply)}`)
-    shared.onAgentJournal?.({ key: journalKey, hash: callHash, result: reply })
+    const status: "approved" | "rejected" | "expired" = expired ? "expired" : reply === false ? "rejected" : "approved"
+    log(`checkpoint("${checkpointId}") -> ${status}:${JSON.stringify(reply)}`)
+    shared.onAgentJournal?.({
+      key: journalKey,
+      hash: callHash,
+      result: reply,
+      checkpoint: { checkpointId, status, request, response: { decision: reply }, createdAt: Date.now() },
+    })
     // Human Reject 强停止（Composite V1.1 红线4）：拒绝不是普通 failure——
     // 不可被 fallback 换候选、不可被 parallel 塔缩 null，直接终止 run；
-    // journal 已记录拒绝事实，resume 确定性重现（改 prompt 才会重问）
+    // journal 已记录拒绝事实，resume 确定性重现（改 request 才会重问）
     if (reply === false) {
       finishCp("failed", "人工拒绝")
       throw new WorkflowError(
-        `checkpoint 被人工拒绝："${promptText}"（Human Reject：流程停止，不触发自动降级）`,
+        `checkpoint 被人工拒绝："${checkpointId}"（Human Reject：流程停止，不触发自动降级）`,
         WorkflowErrorCode.CHECKPOINT_REJECTED,
         { recoverable: false },
       )

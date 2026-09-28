@@ -25,3 +25,7 @@ coverage/
 Thumbs.db
 # 本地文档目录,默认不提交
 Docs/
+
+# 本地测试运行残留的 journal/registry
+.dynamic-workflows/
+.opencode-workflows/

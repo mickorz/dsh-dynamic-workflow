@@ -26,6 +26,8 @@ export type {
   WorkflowMeta,
   WorkflowRunResult,
   JournalEntry,
+  CheckpointRequest,
+  CheckpointRecord,
 } from "./contracts/types.js"
 export { WorkflowError, WorkflowErrorCode, wrapError } from "./contracts/errors.js"
 export type { AgentRunOptions, AgentExecutionResult, AgentSessionRunner } from "./contracts/session-runner.js"

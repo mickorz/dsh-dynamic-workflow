@@ -140,12 +140,41 @@ export interface WorkflowRunResult<T = unknown> {
   runId: string
 }
 
+/** checkpoint 请求(结构化输入;字符串旧签名等价于 { message }) */
+export interface CheckpointRequest {
+  /** 稳定 id(展示与检索;缺省用 message 摘要) */
+  id?: string
+  /** 决策问题 */
+  message: string
+  /** 决策上下文(任意 JSON) */
+  payload?: unknown
+  /** 可选项(展示面;不约束返回值) */
+  options?: string[]
+  /** headless / 超时时的缺省决定 */
+  defaultAction?: unknown
+  /** 等待人工的超时毫秒;超时取 defaultAction(status 记 expired) */
+  timeoutMs?: number
+}
+
+/** checkpoint 状态机(ADR-004):pending 可跨进程恢复;resolved 四态确定性回放 */
+export interface CheckpointRecord {
+  checkpointId: string
+  status: "pending" | "approved" | "rejected" | "expired" | "cancelled"
+  request: CheckpointRequest
+  /** status 到达终态时存在;decision 即脚本收到的返回值 */
+  response?: { decision: unknown; userInput?: unknown }
+  createdAt: number
+  resolvedAt?: number
+}
+
 /** journal 条目：key 为 runId:callIndex，hash 覆盖 prompt/model/phase/agentType/schema（P1-1）
  *  Node Inspector 扩展字段（全部可选，老 journal 无这些字段，读端宽松）：
  *  hash/result 仅在 agent 成功时写入（resume 语义不变）；失败 attempt 只进 executions，绝不写 hash。 */
 export interface JournalEntry {
   hash: string
   result: unknown
+  /** checkpoint 状态机记录(ADR-004):pending 写入、终态更新;resume 按状态分支 */
+  checkpoint?: CheckpointRecord
   model?: string
   label?: string
   /** 所属子 workflow 的实例显示名（分支 A：断点反查哪个子流程的哪一步；root 的 agent 无此字段） */

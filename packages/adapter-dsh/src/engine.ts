@@ -35,6 +35,8 @@ export interface DynamicWorkflowEngineOptions {
   cwd: string
   /** 进度事件出口(宿主事件体系或测试观察者) */
   onProgress?: (event: WorkflowProgressEvent) => void
+  /** checkpoint 人工确认通道(缺省 headless:按 defaultAction;ADR-004 通道分层) */
+  confirm?: (promptText: string) => Promise<unknown>
   concurrency?: number
   maxAgents?: number
 }
@@ -103,6 +105,7 @@ export class DynamicWorkflowEngine {
       signal: input.signal,
       cwd: this.options.cwd,
       registryRootDir: REGISTRY_DIR,
+      confirm: this.options.confirm,
       resolveTier: (tier) => loadModelTiers({ projectDir: this.options.cwd, projectRootDir: TIER_ROOT })[tier],
       runId,
       resumeJournal: resumedFromDisk ? resumeJournal : undefined,
