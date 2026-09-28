@@ -14,11 +14,15 @@ DSH 官方 workflow 是"最小可信内核";本项目提供官方 Deferred 清�
 
 ## 仓库结构(monorepo 规划)
 
-- `packages/core/` — 宿主无关编排运行时:runtime / vm / journal / DSL 全集 / 组合节点 / registry
-- `packages/executor-vm/`、`packages/executor-ptc/` — 执行后端
-- `packages/opencode/` — OpenCode 插件(重构为薄 adapter)
-- `packages/dsh/` — DSH bundle + adapter + `dynamic_workflow` 工具
-- `Docs/` — 需求、知识库、可行性分析与方案文档
+- `packages/core/` — 宿主无关编排核心:runtime / dsl / journal / registry / nodes / contracts。**依赖边界硬化**:core 不知道 OpenCode、DSH、node:vm、PTC、Cordis、jobs、subagents,只依赖七个注入接口(AgentRunner / WorkflowExecutor / JournalStore / CheckpointChannel / EventSink / Clock / IdGenerator),CI 依赖边界测试守门
+- `packages/executor-vm/`、`packages/executor-ptc/` — 执行后端(实现 WorkflowExecutor 接口;vm 为 MVP,PTC 为 production)
+- `packages/adapter-opencode/` — OpenCode 宿主 adapter(现插件重构为薄壳,行为零变化)
+- `packages/adapter-dsh/` — DSH 宿主 adapter + bundle + `dynamic_workflow` 工具;adapter 声明 HostCapabilities 能力位,禁止平台 if-else
+- `Docs/` — 需求、知识库、可行性分析(本地忽略不入库)
+
+## 开发路线(P-1 至 P3,详见可行性分析 v3)
+
+P-1 Core Extraction(OpenCode 行为零变化)→ P0 Architecture Spike → P0.5 Durability Spike(含副作用)→ P1 差异化能力 → P1.5 HITL → P2 Production → P3 生态
 - `thirdparties/` — 第三方参考源码(不纳入版本管理,见 .gitignore)
   - `opencode-dynamic-workflows/` — 原开发的 OpenCode 插件(移植蓝本)
   - `deepseek-harness/` — DeepSeek Harness 官方源码
