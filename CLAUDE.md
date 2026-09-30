@@ -1,4 +1,4 @@
-# dsh-dynamic-workflow
+# dsh-agentic-workflow
 
 **跨 Harness 的 Agent Workflow Runtime**:Durable / Composable / Resumable / Verifiable / Human-in-the-loop。从原 `@mickorz/opencode-dynamic-workflows` 抽象出宿主无关的 Runtime Core,OpenCode 与 DeepSeek Harness (DSH) 是它的两个宿主(adapter),架构上欢迎下一个 harness。
 

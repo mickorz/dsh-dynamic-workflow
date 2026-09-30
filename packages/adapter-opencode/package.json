@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mickorz/dsh-dynamic-workflow"
+    "url": "git+https://github.com/mickorz/dsh-agentic-workflow"
   },
   "files": [
     "dist",
